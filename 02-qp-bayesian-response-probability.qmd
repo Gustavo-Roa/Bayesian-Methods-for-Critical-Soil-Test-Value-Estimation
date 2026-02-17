@@ -1,0 +1,243 @@
+---
+title: "Bayesian Quadratic-Plateau Modeling for Critical Soil Test Value Estimation"
+subtitle: "Posterior Uncertainty and Probability of Yield Response"
+author: "Gustavo A. Roa"
+date: "2026-02-17"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    self-contained: true
+execute:
+  warning: false
+  message: false
+---
+
+# Overview
+## Purpose
+
+This tutorial demonstrates how to:
+
+\- Fit a Bayesian quadratic-plateau (B-QP) model.
+
+\- Estimate the critical soil test value (CSTV).
+
+\- Quantify posterior uncertainty.
+
+\- Compute the probability that expected yield gain exceeds a specified threshold.
+
+\- Construct probability tables and response-risk visualizations.
+
+The emphasis is on shifting inference from a single breakpoint estimate to probability-based decision support.
+
+------------------------------------------------------------------------
+
+# Setup
+Loads required packages for Bayesian modeling, marginal likelihood estimation, and data manipulation.
+```{r}
+# Core packages
+library(tidyverse)
+
+# Data I/O
+library(readxl)
+
+# Bayesian fitting
+library(brms)
+
+
+
+```
+
+
+# Data
+## Import data
+
+```{r}
+dat <- read_excel("./Data_example.xlsx", sheet = "KS_30")
+
+```
+
+## Visual inspection
+Before fitting any model, inspect the observed response pattern.
+```{r}
+ggplot(dat, aes(input_level, response)) +
+  geom_point()
+
+```
+
+# Bayesian Quadratic-Plateau Model
+## Model specification and fitting
+
+```{r}
+# brms formula
+bf_QP <- brms::bf(response ~ b0 + b1 * fmin(input_level, xs) - (b1 / (2 * xs)) * 
+                    fmin(input_level, xs)^2, b0 + b1 + xs ~ 1, nl = TRUE)
+
+# Priors (paper-centered)
+               # Intercept (B0)
+priors_QP <- c(brms::set_prior("normal(58.3, 0.5*58.3)", nlpar = "b0", lb=0),
+               # Linear term (B1)
+               brms::set_prior("normal(3.8, 0.5*3.8)",  nlpar = "b1"),
+               # Critical value (xs = theta)
+               brms::set_prior("normal(21.4, 0.5*21.4)", nlpar = "xs", lb=0),
+               # Residual SD
+               brms::set_prior("student_t(3, 0, 10)", class = "sigma"))
+
+# Fit brms model
+fit_QP_bayes <- brms::brm(bf_QP, data = dat, prior = priors_QP, chains = 5, 
+                          iter = 3000, warmup = 1000, cores = 1, seed = 555,
+                          control = list(adapt_delta = 0.95))
+
+fit_QP_bayes
+
+
+```
+
+# Posterior-Based Yield Gain Inference
+Rather than focusing only on the CSTV, we compute the posterior probability that expected yield gain exceeds a threshold.
+```{r}
+# Extract posterior draws
+dr <- as_draws_df(fit_QP_bayes)
+
+# Model parameters
+b0  <- dr$b_b0_Intercept
+b1  <- dr$b_b1_Intercept
+xs <- dr$b_xs_Intercept
+
+# Define QP mean response function
+# μ(x)=a+bm−2xsb*m2, m=min(x,xs)
+# QP mean function
+mu_qp <- function(x, b0, b1, xs){
+  m <- pmin(x, xs)
+  b0 + b1*m - (b1/(2*xs))*m^2
+}
+
+# Plateau mean (x = xs)
+mu_plateau <- function(b0, b1, xs){
+  b0 + (b1*xs)/2
+}
+
+# Posterior draws of yield gain
+# Δ(x)=μ(xs)−μ(x)
+gain_draws_mean <- function(x0){
+  mu_plateau(b0, b1, xs) - mu_qp(x0, b0, b1, xs)
+}
+
+# Probability of gain exceeding threshold δ
+p_gain_mean <- function(x0, delta = 0){
+  g <- gain_draws_mean(x0)
+  mean(g > delta, na.rm = TRUE)
+}
+
+# Compute response probability curve
+x_grid <- seq(0, 30, by = 0.1)
+
+# Probability expected gain > 0
+p0 <- sapply(x_grid, p_gain_mean, delta = 0) # p0 now contains: P(Δ(x)>0)
+
+#Define risk thresholds
+p_thr <- c(0.70, 0.30)
+
+# Find soil test boundaries where probabilities cross thresholds
+find_boundary <- function(x, p, thr){
+  idx <- which(p <= thr)[1]
+  if (is.na(idx)) return(Inf)
+  if (idx == 1) return(x[1])
+
+  x1 <- x[idx-1]; x2 <- x[idx]
+  p1 <- p[idx-1]; p2 <- p[idx]
+
+  x1 + (thr - p1) * (x2 - x1) / (p2 - p1)
+}
+
+bounds <- sapply(p_thr, function(thr) find_boundary(x_grid, p0, thr))
+
+# Build table
+risk <- data.frame(
+  Class = c("High response probability",
+            "Moderate response probability",
+            "Low response probability"),
+  Prob_range = c("[0.70, 1.00]",
+                 "[0.30, 0.70)",
+                 "[0.00, 0.30)"),
+  lower = c(-Inf, bounds), upper = c(bounds, Inf))
+
+risk 
+
+```
+
+# Probability Lookup Table
+```{r}
+# Define the table grid you want
+x_vals     <- seq(2, 24, by = 1)     # soil test ppm rows: 2,4,...,28
+delta_vals <- seq(0, 10, by = 1)     # delta columns: 2,4,...,20 (RY points)
+
+# Compute
+grid <- expand.grid(Soil_Test_ppm = x_vals, Delta_RY = delta_vals)
+
+grid$Prob_response <- mapply(FUN = p_gain_mean, x0 = grid$Soil_Test_ppm, 
+                             delta = grid$Delta_RY)
+
+```
+
+# Probability Surface (Heatmap)
+
+```{r}
+heat_df <- grid %>%
+  mutate(Prob_pct = 100 * Prob_response)
+
+ggplot(heat_df, aes(x = Soil_Test_ppm, y = Delta_RY)) +
+  
+  # Heatmap layer
+  geom_tile(aes(fill = Prob_pct)) +
+  
+  # Contours (linetype only)
+  geom_contour(aes(z = Prob_pct,
+                   linetype = factor(after_stat(level))),
+               breaks = c(20, 50, 80), color = "black", linewidth = 0.9) +
+  
+  scale_fill_viridis_c(name = "Probability (%)",
+    limits = c(0, 100), option = "D") +
+  
+  scale_linetype_manual(
+    name = "Probability contours",
+    values = c("20" = "dotted",
+               "50" = "dashed",
+               "80" = "solid"),
+    labels = c("20%" = "20%",
+               "50%" = "50%",
+               "80%" = "80%") ) +
+  
+  labs( x = expression(Soil~test~P~(mg~kg^-1)), y = "Δ RY" ) +
+  
+  theme_bw() +
+  theme(panel.grid = element_blank(), axis.text = element_text(color = "black"),
+        panel.background = element_rect(color = "white", linewidth = 1.5)) 
+
+
+```
+
+
+# Probability Curves for Selected Gain Thresholds
+```{r}
+delta_selected <- c(1, 3, 5)
+
+curve_df <- expand.grid(Soil_Test_ppm = x_grid, Delta_RY = delta_selected)
+
+curve_df$Prob <- mapply(p_gain_mean, x0 = curve_df$Soil_Test_ppm,
+                        delta = curve_df$Delta_RY)
+
+ggplot(curve_df, aes(x = Soil_Test_ppm, y = 99*Prob, color=factor(Delta_RY))) +
+  geom_line(linewidth = 1) + 
+  scale_color_viridis_d(name = "Δ RY ≥", option = "E") +
+  
+  scale_x_continuous(limits = c(0, 30), breaks = seq(0, 30, 5)) +
+  
+  labs(x = expression(Soil~test~P~(mg~kg^-1)), 
+       y = "Posterior probability of gain (%)") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), axis.text = element_text(color = "black"),
+        panel.background = element_rect(color = "white", linewidth = 1.5)) 
+
+```

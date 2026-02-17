@@ -1,0 +1,265 @@
+---
+title: "Frequentist and Bayesian Quadratic-Plateau Models for Critical Soil Test Value Estimation"
+subtitle: "Bootstrap Confidence Intervals and Bayesian Credible Intervals"
+author: "Gustavo A. Roa"
+date: "2026-02-17"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    self-contained: true
+execute:
+  warning: false
+  message: false
+---
+
+# Overview
+## Purpose
+
+This tutorial demonstrates how to:
+
+\- Fit the frequentist quadratic-plateau (QP) model.
+
+\- Estimate the critical soil test value (CSTV).
+
+\- Quantify uncertainty using nonparametric bootstrap confidence intervals.
+
+\- Fit the Bayesian quadratic-plateau (B-QP) model.
+
+\- Compare confidence intervals and credible intervals.
+
+\- Visualize differences in uncertainty behavior.
+
+The goal is to contrast resampling-based and probabilistic inference under the same response structure.
+
+
+------------------------------------------------------------------------
+
+# Setup
+Load required packages for nonlinear regression, Bayesian estimation, and visualization.
+```{r}
+# Core packages
+library(tidyverse)
+library(nlraa)
+
+# Data I/O
+library(readxl)
+
+# Bayesian fitting
+library(brms)
+
+```
+
+
+# Data
+## Import data
+
+```{r}
+
+dat <- read_excel("./Data_example.xlsx", sheet = "KS_30")
+
+```
+
+## Visual inspection
+
+```{r}
+ggplot(dat, aes(input_level, response)) +
+  geom_point()
+
+```
+
+# Frequentist Quadratic-Plateau (QP)
+## Model fitting and Bootstrap uncertainty
+```{r}
+# QP using self-starting function
+fm_QP <- nls(response ~ nlraa::SSquadp3xs(input_level, a, b, xs), 
+             data = dat, 
+             control = nls.control(maxiter = 500))
+
+summary(fm_QP) 
+
+
+# Bootstrap coefficients
+set.seed(555)
+fm_QP_bt <- nlraa::boot_nls(fm_QP, R = 5000, cores = 4, data = dat)
+
+# Confidence intervals 
+fm_QP_ci <- quantile(fm_QP_bt$t[, 3], probs = c(0.025, 0.975), na.rm = TRUE)
+
+# QP CSTV and CI
+QP_hat <- coef(fm_QP)["xs"]
+QP_ci  <- fm_QP_ci
+
+```
+
+### Visualize bootstrap distribution (95 CI)
+```{r}
+
+hist(fm_QP_bt$t[, 3][fm_QP_bt$t[, 3] >= fm_QP_ci[1] & 
+                       fm_QP_bt$t[, 3]<= fm_QP_ci[2]],
+  breaks = 30,
+  xlab = "Bootstrap CSTV estimate",
+  main = "Bootstrap distribution (95% CI)")
+
+
+```
+
+# Bayesian Quadratic-Plateau (B-QP)
+## Model fitting and Posterior uncertainty
+```{r}
+# brms formula
+bf_QP <- brms::bf(response ~  a + b * fmin(input_level, xs) - (b / (2 * xs)) * 
+                    fmin(input_level, xs)^2, a + b + xs ~ 1, nl = TRUE)
+
+# Priors (paper-centered)
+               # Intercept (B0)
+priors_QP <- c(brms::set_prior("normal(58.3, 0.5*58.3)", nlpar = "a", lb=0),
+               # Linear term (B1)
+               brms::set_prior("normal(3.8, 0.5*3.8)",  nlpar = "b"),
+               # Critical value (xs = theta)
+               brms::set_prior("normal(21.4, 0.5*21.4)", nlpar = "xs", lb=0),
+               # Residual SD
+               brms::set_prior("student_t(3, 0, 10)", class = "sigma"))
+              ##set_prior("student_t(3, 0, 10)", class = "sigma"))
+              ##set_prior("normal(0, 10)", class = "sigma", lb = 0)
+              ##set_prior("inv_gamma(1, 25)", class = "sigma"))     
+
+# Fit brms model
+fit_QP_bayes <- brms::brm(bf_QP, data = dat, prior = priors_QP, chains = 5, 
+                          iter = 3000, warmup = 1000, cores = 1, seed = 555,
+                          control = list(adapt_delta = 0.95))
+
+fit_QP_bayes
+
+# Extract QP CSTV posterior draws
+xs_QP <- brms::as_draws_df(fit_QP_bayes)$b_xs_Intercept
+
+# Posterior median and 95% CrI
+BQP_hat <- median(xs_QP, na.rm = TRUE)
+BQP_ci  <- quantile(xs_QP, c(0.025, 0.975), na.rm = TRUE)
+
+```
+
+### Posterior density distributions and trace plots 
+```{r, fig.width=8, fig.height=8}
+
+plot(fit_QP_bayes)
+
+```
+
+### Visualize Posterior distribution (95 CrI)
+```{r}
+xs <- as_draws_df(fit_QP_bayes)$b_xs_Intercept
+
+hist(
+  xs[xs >= quantile(xs, 0.025) & xs <= quantile(xs, 0.975)],
+  breaks = 30,
+  xlab = "Posterior CSTV estimate",
+  main = "Posterior distribution (95% CrI)"
+)
+
+```
+
+# Results 
+
+## Prediction grid (shared by QP and BQP)
+
+```{r}
+# Prediction grid
+newdat_QP <- data.frame(input_level = seq(min(dat$input_level, na.rm = TRUE), 
+                                          max(dat$input_level, na.rm = TRUE), 
+                                          length.out = 200))
+
+# QP fitted curve
+newdat_QP$QP_fit <- predict(fm_QP, newdata = newdat_QP)
+
+```
+
+
+# Prediction and Model Comparison
+```{r}
+# Prediction grid
+newdat_BQP <- data.frame(input_level = seq(min(dat$input_level, na.rm = TRUE),
+                                           max(dat$input_level, na.rm = TRUE), 
+                                           length.out = 200))
+
+# Make Stan fmin usable in R
+fmin <- function(a, b) pmin(a, b)
+
+# Posterior expected values (mean response)
+epred <- posterior_epred(fit_QP_bayes, newdata = newdat_BQP,re_formula = NA)
+
+# Summarize posterior mean and 95% CrI
+newdat_BQP$BQP_mean <- colMeans(epred)
+newdat_BQP$BQP_lwr  <- apply(epred, 2, quantile, 0.025)
+newdat_BQP$BQP_upr  <- apply(epred, 2, quantile, 0.975)
+
+```
+
+## Final comparison figure
+
+```{r fig.height=8, fig.width=10}
+
+# Create the plot
+ggplot() + 
+  
+  # Observed data
+  geom_point(data = dat, aes(x = input_level, y = response), 
+             size = 4, alpha = 0.7) +
+  
+  # QP curve
+  geom_line(data = newdat_QP, aes(x = input_level, y = QP_fit, 
+                                color = "Quadratic Plateau (QP)"),
+            linewidth = 1.5) +
+  
+  # BQP curve
+  geom_line(data = newdat_BQP, aes(x = input_level, y=BQP_mean, 
+                                 color = "Bayesian Quadratic Plateau (B-QP)"),
+            linewidth = 1.5) +
+  
+  # QP CSTV point and CI
+  geom_point(data = data.frame(x = QP_hat, y = 60), 
+             aes(x = x, y = y, color = "Quadratic Plateau (QP)"), 
+             size = 5, shape = 17, inherit.aes = FALSE) +
+  
+  geom_errorbar(data = data.frame(xmin = QP_ci[1], xmax = QP_ci[2], y = 60),
+                aes(xmin = xmin, xmax = xmax, y = y, 
+                    color = "Quadratic Plateau (QP)"),
+                width = 0.1, linewidth = 1.5, inherit.aes = FALSE) +
+  
+  # BQP CSTV point and CI
+  geom_point(data = data.frame(x = BQP_hat, y = 55), 
+             aes(x = x, y = y, color = "Bayesian Quadratic Plateau (B-QP)"),
+             size = 5, shape = 17, inherit.aes = FALSE) +
+  geom_errorbar(data = data.frame(xmin = BQP_ci[1], xmax = BQP_ci[2], y = 55),
+                aes(xmin = xmin, xmax = xmax, y = y, 
+                    color = "Bayesian Quadratic Plateau (B-QP)"), 
+                width = 0.1, linewidth = 1.5, inherit.aes = FALSE) +
+  
+  # Annotations
+  annotate("text", x = 90, y = 50, label = paste0(
+      "QP: ", round(QP_hat, 0),
+      " (CI: ", round(QP_ci[1], 0), ", ", round(QP_ci[2], 0), ")"), 
+      size = 6) +
+  
+  annotate("text", x = 90, y = 45, label = paste0(
+      "B-QP: ", round(BQP_hat, 0),
+      " (CrI: ", round(BQP_ci[1], 0), ", ", round(BQP_ci[2], 0), ")"), 
+      size = 6) +
+  
+  # Scales and theme
+  scale_x_continuous(limits = c(0, 110), breaks = seq(0, 110, 10)) +
+  scale_y_continuous(limits = c(40, 100), breaks = seq(40, 100, 10)) +
+  scale_color_viridis_d(option = "H") +
+  
+  guides(color = guide_legend(title = NULL)) +
+  theme_bw(base_size = 22) +
+  theme(panel.grid = element_blank(), axis.text = element_text(color = "black"),
+    panel.background = element_rect(color = "black", linewidth = 2),
+    legend.key = element_rect(color = "white"),
+    legend.position = "top" ) +
+  labs(y = "Relative yield (%)", x = expression(Soil~test~P~(mg~kg^-1)))
+
+```
+
