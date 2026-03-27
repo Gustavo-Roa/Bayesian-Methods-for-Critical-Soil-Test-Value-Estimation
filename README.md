@@ -1,11 +1,11 @@
-# Bayesian Methods for Estimation Under Uncertainty  
-## A Critical Soil Test Value Application
+# Bayesian Inference for Agronomic Response Models: A Critical Soil Test Value Application
 
 This repository provides reproducible code accompanying the manuscript:
 
 Roa, G.A., Spooner, J., Kerns, A.W., Hefley, T.J., & Ruiz Diaz, D.A.  
 *Bayesian Methods for Estimation Under Uncertainty: A Critical Soil Test Value Application*  
 
+DOI (Zenodo archive): https://doi.org/XXXXX
 ---
 
 ## Purpose
@@ -66,4 +66,9 @@ A simulated example dataset is included for reproducibility.
 
 ## Citation
 
-If using this repository, please cite the associated manuscript.
+If using this repository, please cite:
+
+Roa, G.A., Spooner, J., Kerns, A.W., Hefley, T.J., & Ruiz Diaz, D.A.  
+*Bayesian inference for agronomic response models: A critical soil test value application*  
+
+Roa, G.A. (2026). Bayesian agronomic CSTV (Version X.X) [Code]. Zenodo. https://doi.org/XXXXX
